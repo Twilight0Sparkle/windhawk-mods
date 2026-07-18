@@ -6,7 +6,7 @@
 // @author          angel_lov
 // @github          https://github.com/Twilight0Sparkle
 // @include         explorer.exe
-// @compilerOptions -luser32 -lgdi32 -lcomctl32
+// @compilerOptions -luser32 -lgdi32
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -72,7 +72,7 @@ more polished and modern.
   $description: Animation duration in milliseconds (100-2000). Default is 300.
 - initial_alpha: 90
   $name: Manual Initial Opacity
-  $description: Starting opacity (1-255). Only used if Auto-calculate Opacity is disabled. Default is 55.
+  $description: Starting opacity (1-255). Only used if Auto-calculate Opacity is disabled. Default is 90.
 - auto_calc_opacity: false
   $name: Auto-calculate Opacity
   $description: Automatically sets starting opacity based on speed and duration settings.
@@ -110,8 +110,8 @@ struct AnimPayload {
 
 std::atomic<int>  g_settingSpeed{100};
 std::atomic<int>  g_settingDuration{300};
-std::atomic<int>  g_settingInitialAlpha{55};
-std::atomic<bool> g_settingAutoCalcAlpha{true};
+std::atomic<int>  g_settingInitialAlpha{90};
+std::atomic<bool> g_settingAutoCalcAlpha{false};
 std::atomic<bool> g_settingAccelerateIfCovered{true};
 std::atomic<bool> g_settingSingleInstance{false};
 std::atomic<bool> g_settingUseCustomColor{false};
@@ -141,12 +141,8 @@ HWND g_hCachedSysListView32    = NULL;
 constexpr int kAnimBorderStartAlpha = 190;
 
 struct AnimState {
-    float borderAlpha;
+    float alpha;
     float decrement;
-    int   targetFillAlpha;
-    int   w;
-    int   h;
-    int   borderThickness;  // device pixels, DPI-scaled for the target monitor
 };
 std::map<HWND, AnimState> g_animations;
 
@@ -167,7 +163,7 @@ COLORREF GetTargetBorderColor() {
         DWORD hex = g_settingCustomBorderColor.load();
         return RGB((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF);
     }
-    return GetSysColor(COLOR_HOTLIGHT);
+    return GetSysColor(COLOR_HIGHLIGHT);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,10 +177,10 @@ int CalculateSmartAlpha(int speed, int duration) {
     int actualDuration = (duration * 100) / speed;
     if (actualDuration < 16) actualDuration = 16;
 
-    // Anchor: at the defaults (speed=100, duration=300) this returns ~55,
+    // Anchor: at the defaults (speed=100, duration=300) this returns ~90,
     // matching the manual default so toggling auto-calc changes nothing.
     const double kRefMs    = 300.0;
-    const double kRefAlpha = 55.0;
+    const double kRefAlpha = 90.0;
     double scale      = std::sqrt(kRefMs / (double)actualDuration);
     double calculated = kRefAlpha * scale;
     return std::max(30, std::min(150, (int)lround(calculated)));
@@ -321,23 +317,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg,
                     if (GetClassNameW(hRoot, cls, 64) &&
                         wcscmp(cls, L"Progman") != 0 &&
                         wcscmp(cls, L"WorkerW") != 0) {
-                        float fastDec = (float)kAnimBorderStartAlpha / 5.0f;
+                        float fastDec = 255.0f / 5.0f;
                         if (st.decrement < fastDec) st.decrement = fastDec;
                     }
                 }
             }
 
-            st.borderAlpha -= st.decrement;
-            if (st.borderAlpha <= 0.0f) {
+            st.alpha -= st.decrement;
+            if (st.alpha <= 0.0f) {
                 KillTimer(hwnd, TIMER_ID_FADE);
                 g_animations.erase(it);
                 DestroyWindow(hwnd);
             } else {
-                int fillAlpha = (int)(st.borderAlpha *
-                                      (double)st.targetFillAlpha / 255.0);
-                PaintMarqueeDIB(hwnd, st.w, st.h,
-                                (int)st.borderAlpha, fillAlpha,
-                                st.borderThickness);
+                BLENDFUNCTION blend = {AC_SRC_OVER, 0, (BYTE)st.alpha, AC_SRC_ALPHA};
+                UpdateLayeredWindow(hwnd, NULL, NULL, NULL, NULL, NULL, 0, &blend, ULW_ALPHA);
             }
         }
         return 0;
@@ -469,19 +462,19 @@ LRESULT CALLBACK ManagerWndProc(HWND hwnd, UINT msg,
             if (dpi == 0) dpi = 96;
             int borderThickness = std::max(1, (int)lround((double)dpi / 96.0));
 
+            int w = payload->rc.right  - payload->rc.left;
+            int h = payload->rc.bottom - payload->rc.top;
+
             AnimState st;
-            st.borderAlpha    = (float)kAnimBorderStartAlpha;
-            st.decrement      = (float)kAnimBorderStartAlpha /
-                                ((float)actualDuration / 16.0f);
-            st.targetFillAlpha = targetFillAlpha;
-            st.w              = payload->rc.right  - payload->rc.left;
-            st.h              = payload->rc.bottom - payload->rc.top;
-            st.borderThickness = borderThickness;
+            st.alpha      = 255.0f;
+            st.decrement  = 255.0f / ((float)actualDuration / 16.0f);
 
             g_animations[hOverlay] = st;
-            PaintMarqueeDIB(hOverlay, st.w, st.h,
+            
+            // Build the bitmap exactly ONCE
+            PaintMarqueeDIB(hOverlay, w, h,
                             kAnimBorderStartAlpha, targetFillAlpha,
-                            st.borderThickness);
+                            borderThickness);
 
             // Insert just above whatever window sits directly above the desktop
             // so the overlay is never drawn on top of real windows.
@@ -594,6 +587,22 @@ DWORD WINAPI WorkerThreadProc(LPVOID) {
 // ---------------------------------------------------------------------------
 
 BOOL Wh_ModInit() {
+    // Avoid installing the global hook in instances launched as /factory or -Embedding
+    PCWSTR cmdLine = GetCommandLineW();
+    if (cmdLine && (wcsstr(cmdLine, L"/factory") || wcsstr(cmdLine, L"-Embedding"))) {
+        return FALSE;
+    }
+
+    // Ensure we only install the hook on the shell explorer instance
+    HWND hShell = GetShellWindow();
+    if (hShell) {
+        DWORD shellPid = 0;
+        GetWindowThreadProcessId(hShell, &shellPid);
+        if (shellPid != 0 && shellPid != GetCurrentProcessId()) {
+            return FALSE;
+        }
+    }
+
     LoadSettings();
     g_hThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, &g_dwThreadId);
     return g_hThread != NULL;
