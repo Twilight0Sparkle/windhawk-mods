@@ -4,6 +4,7 @@
 // @description     Adds a smooth fade-out animation to the desktop selection rectangle when you release the mouse button.
 // @version         1.0.0
 // @author          angel_lov
+// @github          https://github.com/Twilight0Sparkle
 // @include         explorer.exe
 // @compilerOptions -luser32 -lgdi32 -lcomctl32
 // @license         MIT
